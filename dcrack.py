@@ -555,12 +555,11 @@ def usage():
 
 def get_speed():
 	print("Getting speed")
-	#p = subprocess.Popen(["aircrack-ng", "-S"], stdout=subprocess.PIPE)
-	#speed = p.stdout.readline()
-	#speed = speed.split()
-	#speed = speed[len(speed) - 2]
-	#return int(speed)
-	return 1000
+	p = subprocess.Popen(["aircrack-ng", "-S"], stdout=subprocess.PIPE)
+	speed = p.stdout.readline()
+	speed = speed.split()
+	speed = speed[len(speed) - 2]
+	return int(speed)
 
 def get_cid():
 	return random.getrandbits(64)
