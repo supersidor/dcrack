@@ -12,6 +12,7 @@ import gzip
 import json
 import datetime
 import re
+import threading
 
 if sys.version_info[0] >= 3:
 	from socketserver import ThreadingTCPServer
@@ -34,6 +35,9 @@ cid = None
 tls = threading.local()
 nets = {}
 cracker = None
+#splitcount=30000
+splitcount=3000000
+dictdir = "dict"
 
 class ServerHandler(SimpleHTTPRequestHandler):
 	def do_GET(s):
@@ -58,47 +62,57 @@ class ServerHandler(SimpleHTTPRequestHandler):
 		s.send_header("Content-type", "text/plain")
 		s.end_headers()
 		s.wfile.write(bytes("OK", "UTF-8"))
-
+	
 	def do_upload_dict(s):
 		con = get_con()
-
-		f = "dcrack-dict"
-		c = f + ".gz"
-		o = open(c, "wb")
 		cl = int(s.headers['Content-Length'])
-		o.write(s.rfile.read(cl))
+
+		tempfile = "dcrack-dict.txt"
+		try:
+    			os.remove(tempfile)
+		except OSError:
+    			pass
+		o = open(tempfile, "wb")
+		count = 0;
+		while count<cl:
+			toread = 10000
+			if count+toread>cl:
+				toread = cl-count
+			data = s.rfile.read(toread)
+			o.write(data)
+			count=count+len(data)
 		o.close()
 
-		decompress(f)
-	
-		sha1 = hashlib.sha1()
-		x = open(f, "rb")
-		sha1.update(x.read())
-		x.close()
-		h = sha1.hexdigest()
 
-		x = open(f, "rb")
-		for i, l in enumerate(x):
-			pass
+		if not os.path.exists(dictdir):
+    			os.makedirs(dictdir)
+		else:
+		   filelist = [ f for f in os.listdir(dictdir)]
+		   for f in filelist:
+    			os.remove(dictdir+"/"+f)
 
-		i = i + 1
-		x.close()
+		lines = 0;
+		part=1
+		
+		arch = create_dictpart(part)
+		with open(tempfile) as fdata:
+	    		for line in fdata:
+				arch.write(line)
+				lines = lines + 1
+				if lines>splitcount:
+					arch.close()
+					lines = 0
+					part = part + 1
+					arch = create_dictpart(part)
 
-		n = "%s-%s.txt" % (f, h)
-		os.rename(f, n)
-		os.rename(c, "%s.gz" % n)
-
-		c = con.cursor()
-		c.execute("INSERT into dict values (?, ?, 0)", (h, i))
-		con.commit()
-
+		arch.close()			  
 	def do_upload_cap(s):
 		cl = int(s.headers['Content-Length'])
 		f = open("dcrack.cap.tmp.gz", "wb")
 		f.write(s.rfile.read(cl))
 		f.close()
 
-		decompress("dcrack.cap.tmp")
+		decompress("dcrack.cap.tmp.gz","dcrack.cap.tmp")
 		os.rename("dcrack.cap.tmp.gz", "dcrack.cap.gz")
 		os.rename("dcrack.cap.tmp", "dcrack.cap")
 
@@ -119,11 +133,6 @@ class ServerHandler(SimpleHTTPRequestHandler):
 		if ("getwork" in path):
 			return s.do_getwork(path)
 
-		if ("dict" in path and "status" in path):
-			return s.do_dict_status(path)
-
-		if ("dict" in path and "set" in path):
-			return s.do_dict_set(path)
 
 		if ("dict" in path):
 			return s.get_dict(path)
@@ -167,14 +176,11 @@ class ServerHandler(SimpleHTTPRequestHandler):
 		c.execute("SELECT * from clients")
 	
 		clients = []
-
+	
 		for r in c.fetchall():
 			clients.append(r['speed'])
 
 		nets = []
-
-		c.execute("SELECT * from dict where current = 1")
-		dic = c.fetchone()
 
 		c.execute("SELECT * from nets")
 
@@ -184,20 +190,34 @@ class ServerHandler(SimpleHTTPRequestHandler):
 				n["pass"] = r['pass']
 
 			if r['state'] != 2:
-				n["tot"] = dic["lines"]
+				cur = con.cursor()
+				cur.execute("""SELECT * from work WHERE net = ? """,(n['bssid'],))
+				total = 0
+				finished = 0
+				inprogress = 0
+				for row in cur.fetchall():
+					total = total + 1
+					if row['state']==2:
+						finished+=1
+					elif row['state']==1:
+						inprogress+=1
+				n['parts']=total
+				n['finished']=finished
+				n['inprogress']=inprogress
+	
+				"""n["tot"] = dic["lines"]
 
 				did = 0
 				cur = con.cursor()
-				cur.execute("""SELECT * from work where net = ?
-						and dict = ? and state = 2""",
+				cur.execute(SELECT * from work where net = ?
+						and dict = ? and state = 2,
 						(n['bssid'], dic['id']))
 				for row in cur.fetchall():
 					did += row['end'] - row['start']
 
 				n["did"] = did
-
+			"""
 			nets.append(n)
-
 		d = { "clients" : clients, "nets" : nets }
 
 		return json.dumps(d)
@@ -231,6 +251,10 @@ class ServerHandler(SimpleHTTPRequestHandler):
 			(pw, net))
 
 		con.commit()
+		c.execute("UPDATE work set state = 2 where bssid = ?", \
+			(net,))
+
+		con.commit()
 
 		return "OK"
 
@@ -256,8 +280,9 @@ class ServerHandler(SimpleHTTPRequestHandler):
 		if "pass" in qs:
 			return s.do_result_pass(n, qs['pass'][0])
 
-		wl = qs['wl'][0]
-
+		part = qs['part'][0]
+		print n
+		print part
 		c = con.cursor()
 		c.execute("SELECT * from nets where bssid = ?", (n,))
 		r = c.fetchone()
@@ -265,36 +290,10 @@ class ServerHandler(SimpleHTTPRequestHandler):
 			return "Already done"
 
 		c.execute("""UPDATE work set state = 2 where 
-			net = ? and dict = ? and start = ? and end = ?""",
-			(n, wl, qs['start'][0], qs['end'][0]))
+			net = ? and part = ?""",
+			(n, part))
 
 		con.commit()
-
-		if c.rowcount == 0:
-			c.execute("""INSERT into work values
-				(NULL, ?, ?, ?, ?, datetime(), 2)""",
-					(n, wl, qs['start'][0], qs['end'][0]))
-			con.commit()
-
-		# check status
-		c.execute("""SELECT * from work where net = ? and dict = ?
-			and state = 2 order by start""", (n, wl))
-
-		i = 0
-		r = c.fetchall()
-		for row in r:
-			if i == row['start']:
-				i = row['end']
-			else:
-				break
-
-		c.execute("SELECT * from dict where id = ? and lines = ?",
-			(wl, i))
-
-		r = c.fetchone()
-
-		if r:
-			s.net_done(n)
 
 		return "OK"
 
@@ -305,7 +304,7 @@ class ServerHandler(SimpleHTTPRequestHandler):
 		p = path.split("/")
 		n = p[4]
 
-		fn = "dcrack-dict-%s.txt.gz" % n
+		fn = dictdir+"/%s.txt.gz" % n
 
 		return s.serve_file(fn)
 
@@ -332,21 +331,19 @@ class ServerHandler(SimpleHTTPRequestHandler):
 		c.execute("INSERT into nets values (?, NULL, 1)", (n,))
 		con.commit()
 
-		return "OK"
 
-	def do_dict_set(s, path):
-		con = get_con()
-
-		p = path.split("/")
-
-		h = p[4]
-
-		c = con.cursor()
-		c.execute("UPDATE dict set current = 0")
-		c.execute("UPDATE dict set current = 1 where id = ?", (h,))
+		if not os.path.exists(dictdir):
+    			os.makedirs(dictdir)
+		filelist = [ f for f in os.listdir(dictdir)]
+		part = 1
+		for f in filelist:
+			c.execute("INSERT into work values (?, ?,NULL,0)", (n,part,))
+			part = part + 1
 		con.commit()
 
+
 		return "OK"
+
 
 	def do_ping(s, path):
 		con = get_con()
@@ -423,10 +420,29 @@ class ServerHandler(SimpleHTTPRequestHandler):
 		con = get_con()
 
 		c = con.cursor()
+		#3600
+		c.execute("""UPDATE work SET state=0 WHERE 
+			    ((strftime('%s', datetime()) - strftime('%s', requested))
+			    > 60) and state = 1""")
 
-		c.execute("""DELETE from work where 
+
+		c.execute("select * from work where state = 0  limit 1")
+		print "get work"
+		res = c.fetchone()
+		if res:
+			crack = {"net" : res['net'], 'part' : res['part']}
+			print crack
+			c.execute("UPDATE work SET state=1,requested=datetime() WHERE net=? AND part=?",(res['net'],res['part']))
+			con.commit()
+			return json.dumps(crack)
+		res = { "interval" : "60" }
+
+		return json.dumps(res)
+		
+
+		"""c.execute(DELETE from work where 
 			    ((strftime('%s', datetime()) - strftime('%s', last))
-			    > 3600) and state = 1""")
+			    > 3600) and state = 1)
 
 		con.commit()
 
@@ -442,8 +458,8 @@ class ServerHandler(SimpleHTTPRequestHandler):
 				return res
 
 		# try some old stuff
-		c.execute("""select * from work where state = 1 
-			order by last limit 1""")
+		c.execute(select * from work where state = 1 
+			order by last limit 1)
 
 		res = c.fetchone()
 
@@ -453,23 +469,8 @@ class ServerHandler(SimpleHTTPRequestHandler):
 				res = s.try_network(row, d)
 				if res:
 					return res
+		"""
 
-		res = { "interval" : "60" }
-
-		return json.dumps(res)
-
-	def do_dict_status(s, path):
-		p = path.split("/")
-
-		d = p[4]
-
-		try:
-			f = open("dcrack-dict-%s.txt" % d)
-			f.close()
-
-			return "OK"
-		except:
-			return "NO"
 
 def create_db():
 	con = get_con()
@@ -478,14 +479,14 @@ def create_db():
 	c.execute("""create table clients (id varchar(255),
 			speed integer, last datetime)""")
 
-	c.execute("""create table dict (id varchar(255), lines integer,
-			current boolean)""")
-	c.execute("""create table nets (bssid varchar(255), pass varchar(255),
+	c.execute("""create table nets (bssid varchar(255) primary key, pass varchar(255),
 			state integer)""")
 
-	c.execute("""create table work (id integer primary key,
-		net varchar(255), dict varchar(255),
-		start integer, end integer, last datetime, state integer)""")
+#	c.execute("""create table work (id integer primary key,
+#		net varchar(255), dict varchar(255),
+#		start integer, end integer, last datetime, state integer)""")
+
+	c.execute("""create table work (net varchar(255),part integer,requested datetime, state integer)""")
 
 def connect_db():
 	con = sqlite3.connect('dcrack.db')
@@ -511,15 +512,31 @@ def init_db():
 	except:
 		create_db()
 
+class myClass():
+    def __init__(self,httpd):
+	self.httpd = httpd;
+    def shutdown(self):
+	httpd.shutdown()
+httpd = None
 def server():
 	init_db()
-
-	server_class = ThreadingTCPServer 
+	
+	server_class = ThreadingTCPServer
+	server_class.allow_reuse_address = True
+	global httpd 
 	httpd = server_class(('', port), ServerHandler)
 
-	print("Starting server")
-	httpd.serve_forever()
-
+	import signal
+	import sys
+	def signal_handler(signal, frame):
+		print('Ctrl+C pressed!')
+		m = myClass(httpd)
+		thread = threading.Thread(target = m.shutdown)
+		thread.start()
+	signal.signal(signal.SIGINT, signal_handler)
+	print "Starting server"
+        httpd.serve_forever()
+	httpd.server_close()
 def usage():
 	print("""dcrack v0.3
 
@@ -538,11 +555,12 @@ def usage():
 
 def get_speed():
 	print("Getting speed")
-	p = subprocess.Popen(["aircrack-ng", "-S"], stdout=subprocess.PIPE)
-	speed = p.stdout.readline()
-	speed = speed.split()
-	speed = speed[len(speed) - 2]
-	return int(speed)
+	#p = subprocess.Popen(["aircrack-ng", "-S"], stdout=subprocess.PIPE)
+	#speed = p.stdout.readline()
+	#speed = speed.split()
+	#speed = speed[len(speed) - 2]
+	#return int(speed)
+	return 1000
 
 def get_cid():
 	return random.getrandbits(64)
@@ -570,21 +588,30 @@ def try_ping(speed):
 			time.sleep(60)
 
 def get_work():
-	global url, cid, cracker
+	global url, cid, cracker,nets
 
 	u = url + "client/" + str(cid) + "/getwork"
 	stuff = urlopen(u).read()
 	stuff = stuff.decode("utf-8")
 
 	crack = json.loads(stuff)
-
+	print(crack)
 	if "interval" in crack:
 		print("Waiting")
 		return int(crack['interval'])
 
 	wl  = setup_dict(crack)
 	cap = get_cap(crack)
+	print wl
+	print cap
+	if crack['net'] not in nets:
+	     print("Can't find net %s" % crack['net'])
+	     u = "%snet/%s/result?part=%s" % \
+		   	(url, crack['net'], crack['part'])
 
+	     stuff = urlopen(u).read()
+	     print stuff
+	
 	print("Cracking")
 
 	cmd = ["aircrack-ng", "-w", wl, "-b", crack['net'], "-q", cap]
@@ -598,14 +625,14 @@ def get_work():
 	res = str(res)
 
 	cracker = None
-
+	
 	if ("not in dictionary" in res):
 		print("No luck")
-		u = "%snet/%s/result?wl=%s&start=%d&end=%d&found=0" % \
-		    	(url, crack['net'], crack['dict'], \
-			crack['start'], crack['end'])
+		u = "%snet/%s/result?part=%s" % \
+		    	(url, crack['net'], crack['part'])
 
 		stuff = urlopen(u).read()
+		print stuff
 	elif "KEY FOUND" in res:
 		pw = re.sub("^.*\[ ", "", res)
 
@@ -619,111 +646,77 @@ def get_work():
 
 		u = "%snet/%s/result?pass=%s" % (url, crack['net'], pw)
 		stuff = urlopen(u).read()
-
+		print stuff
 	return 0
 
-def decompress(fn):
-	f = gzip.open(fn + ".gz")
-	o = open(fn, "wb")
+def decompress(fn,fn_decompressed):
+	f = gzip.open(fn)
+	o = open(fn_decompressed, "wb")
 	o.writelines(f)
 	o.close()
 	f.close()
-
 def setup_dict(crack):
 	global url
+	bssid = crack['net']
+	part = crack['part']
 
-	d = crack['dict']
+	print("Downloading part %d" % part)
 
-	fn = "dcrack-client-dict-%s.txt" % d
-
-	try:
-		f = open(fn)
-		f.close()
-	except:
-		print("Downloading dictionary %s" % d)
-
-		u = "%sdict/%s" % (url, d)
-		stuff = urlopen(u)
-
-		f = open(fn + ".gz", "wb")
-		f.write(stuff.read())
-		f.close()
-
-		print("Uncompressing dictionary")
-		decompress(fn)
+	u = "%sdict/%d" % (url, part)
+	print u
 	
-		sha1 = hashlib.sha1()
-		f = open(fn, "rb")
-		sha1.update(f.read())
-		f.close()
-		h = sha1.hexdigest()
+	stuff = urlopen(u)
 
-		if h != d:
-			print("bad dictionary")
-			exit(1)
-
-	s = "dcrack-client-dict-%s-%d:%d.txt" \
-		% (d, crack['start'], crack['end']) 
-
+	fn_decompressed = "client_dict.txt"
+	fn = fn_decompressed+".gz"
 	try:
-		f = open(s)
-		f.close()
-	except:
-		print("Splitting dict %s" % s)
-		f = open(fn, "rb")
-		o = open(s, "wb")
+    		os.remove(fn)
+	except OSError:
+    		pass
+	try:
+    		os.remove(fn_decompressed)
+	except OSError:
+    		pass
 
-		for i, l in enumerate(f):
-			if i >= crack['end']:
-				break
+	f = open(fn, "wb")
+	f.write(stuff.read())
+	f.close()
 
-			if i >= crack['start']:
-				o.write(l)
+	print("Uncompressing dictionary")
+	decompress(fn,fn_decompressed)
 
-		f.close()
-		o.close()
-
-	return s
+	return fn_decompressed
 
 def get_cap(crack):
 	global url, nets
-
-	fn = "dcrack-client.cap"
-
-	bssid = crack['net'].upper()
-
-	if bssid in nets:
-		return fn
-
+	fn_decompressed = "dcrack-client.cap" 
+	fn = fn_decompressed+".gz"
 	try:
-		f = open(fn, "rb")
-		f.close()
-		check_cap(fn, bssid)
-	except:
-		pass
-
-	if bssid in nets:
-		return fn
-
+    		os.remove(fn)
+	except OSError:
+    		pass
+	try:
+    		os.remove(fn_decompressed)
+	except OSError:
+    		pass
+	bssid = crack['net'].upper()
 	print("Downloading cap")
 	u = "%scap/%s" % (url, bssid)
-
+	print u
 	stuff = urlopen(u)
 
-	f = open(fn + ".gz", "wb")
+	f = open(fn, "wb")
 	f.write(stuff.read())
 	f.close()
 
 	print("Uncompressing cap")
-	decompress(fn)
+	decompress(fn,fn_decompressed)
 
 	nets = {}
-	check_cap(fn, bssid)
+	check_cap(fn_decompressed, bssid)
 
-	if bssid not in nets:
-		raise BaseException("Can't find net %s" % bssid)
 
-	return fn
+	return fn_decompressed
 
 def process_cap(fn):
 	global nets
@@ -827,12 +820,19 @@ def upload_file(url, f):
 
 	f = open(f, "rb")
 	c.request("POST", x.path, f)
+	f.close()
+
 	res = c.getresponse()
 	stuff = res.read()
 	c.close()
-	f.close()
 
 	return stuff
+
+def create_dictpart(filenum):
+	filename = dictdir+"/%d.txt.gz" % (filenum)
+	o = gzip.open(filename, "wb")
+	return o
+
 
 def compress_file(f):
 	i = open(f, "rb")
@@ -852,28 +852,28 @@ def send_dict():
 
 	print("Calculating dictionary hash for %s" % d)
 
-	sha1 = hashlib.sha1()
-	f = open(d, "rb")
-	sha1.update(f.read())
-	f.close()
+	#sha1 = hashlib.sha1()
+	#f = open(d, "rb")
+	#sha1.update(f.read())
+	#f.close()
 
-	h = sha1.hexdigest()
+	#h = sha1.hexdigest()
 
-	print("Hash is %s" % h)
+	#print("Hash is %s" % h)
 
-	u = url + "dict/" + h + "/status"
-	stuff = urlopen(u).read()
+	#u = url + "dict/" + h + "/status"
+	#stuff = urlopen(u).read()
 
-	if "NO" in str(stuff):
-		u = url + "dict/create"
-		print("Compressing dictionary")
-		compress_file(d)
-		print("Uploading dictionary")
-		upload_file(u, d + ".gz")
+	#if "NO" in str(stuff):
+	u = url + "dict/create"
+	#print("Compressing dictionary")
+	#compress_file(d)
+	print("Uploading dictionary")
+	upload_file(u, d)
 
-	print("Setting dictionary to %s" % d)
-	u = url + "dict/" + h + "/set"
-	stuff = urlopen(u).read()
+	#print("Setting dictionary to %s" % d)
+	#u = url + "dict/" + h + "/set"
+	#stuff = urlopen(u).read()
 
 def send_cap():
 	global url
@@ -934,25 +934,12 @@ def cmd_status():
 
 	for n in stuff['nets']:
 		out = n['bssid'] + " "
-
 		if "pass" in n:
 			out += n['pass']
-		elif "did" in n:
-			did = int(float(n['did']) / float(n['tot']) * 100.0)
-			out += str(did) + "%"
-			need += n['tot'] - n['did']
 		else:
-			out += "-"
-
+			out += " parts:"+str(n['parts'])+ " finished:"+str(n['finished'])+ " inprogress:"+str(n['inprogress'])
 		print(out)
 
-	if need != 0:
-		print("\nKeys left %d" % need)
-		if speed != 0:
-			s = int(float(need) / float(speed))
-			sec = datetime.timedelta(seconds=s)
-			d = datetime.datetime(1,1,1) + sec
-			print("ETA %dh %dm" % (d.hour, d.minute))
 
 def do_cmd():
 	global url
