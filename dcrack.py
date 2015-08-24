@@ -251,7 +251,7 @@ class ServerHandler(SimpleHTTPRequestHandler):
 			(pw, net))
 
 		con.commit()
-		c.execute("UPDATE work set state = 2 where bssid = ?", \
+		c.execute("UPDATE work set state = 2 where net = ?", \
 			(net,))
 
 		con.commit()
