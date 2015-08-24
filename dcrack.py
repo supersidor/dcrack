@@ -420,10 +420,9 @@ class ServerHandler(SimpleHTTPRequestHandler):
 		con = get_con()
 
 		c = con.cursor()
-		#3600
 		c.execute("""UPDATE work SET state=0 WHERE 
 			    ((strftime('%s', datetime()) - strftime('%s', requested))
-			    > 60) and state = 1""")
+			    > 3600) and state = 1""")
 
 
 		c.execute("select * from work where state = 0  limit 1")
