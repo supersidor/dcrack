@@ -524,7 +524,7 @@ def server():
 	server_class = ThreadingTCPServer
 	server_class.allow_reuse_address = True
 	global httpd 
-	httpd = server_class(('', port), ServerHandler)
+	httpd = server_class(('0.0.0.0', port), ServerHandler)
 
 	import signal
 	import sys
