@@ -13,6 +13,7 @@ import json
 import datetime
 import re
 import threading
+import socket
 
 if sys.version_info[0] >= 3:
 	from socketserver import ThreadingTCPServer
@@ -176,9 +177,11 @@ class ServerHandler(SimpleHTTPRequestHandler):
 		c.execute("SELECT * from clients")
 	
 		clients = []
-	
 		for r in c.fetchall():
-			clients.append(r['speed'])
+			client = {}
+			client['speed']=r['speed']
+			client['name']=r['name']			
+			clients.append(client)
 
 		nets = []
 
@@ -354,15 +357,16 @@ class ServerHandler(SimpleHTTPRequestHandler):
 
 		x  = urlparse(path)
 		qs = parse_qs(x.query)
-
+                print qs
 		speed = qs['speed'][0]
+		name = qs['name'][0]
 
 		c = con.cursor()
 		c.execute("SELECT * from clients where id = ?", (cid,))
 		r = c.fetchall()
 		if (not r):
-			c.execute("INSERT into clients values (?, ?, datetime())",
-				  (cid, int(speed)))
+			c.execute("INSERT into clients values (?, ?,?, datetime())",
+				  (cid, int(speed),name))
 		else:
 			c.execute("""UPDATE clients set speed = ?, 
 					last = datetime() where id = ?""",
@@ -476,7 +480,7 @@ def create_db():
 
 	c = con.cursor()
 	c.execute("""create table clients (id varchar(255),
-			speed integer, last datetime)""")
+			speed integer, name varchar(255), last datetime)""")
 
 	c.execute("""create table nets (bssid varchar(255) primary key, pass varchar(255),
 			state integer)""")
@@ -541,7 +545,8 @@ def usage():
 
 	Usage: dcrack.py [MODE]
 	server                        Runs coordinator
-	client <server addr>          Runs cracker
+	client  <server addr>          Runs cracker
+	clientp <server addr>          Runs pyrit cracker
 	cmd    <server addr> [CMD]    Sends a command to server
 
 		[CMD] can be:
@@ -552,21 +557,31 @@ def usage():
 			status""")
 	exit(1)
 
-def get_speed():
+def get_speed(pyrit):
 	print("Getting speed")
-	p = subprocess.Popen(["aircrack-ng", "-S"], stdout=subprocess.PIPE)
-	speed = p.stdout.readline()
-	speed = speed.split()
-	speed = speed[len(speed) - 2]
-	return int(speed)
-
+	if not pyrit:
+		p = subprocess.Popen(["aircrack-ng", "-S"], stdout=subprocess.PIPE)
+		speed = p.stdout.readline()
+		speed = speed.split()
+		speed = speed[len(speed) - 2]
+		return int(speed)
+	else:
+		p = subprocess.Popen(["pyrit", "benchmark"], stdout=subprocess.PIPE)	
+		res = p.communicate()[0]
+		res = str(res)
+		print res
+		m = re.search("Computed (\d+[.]\d+) PMKs/s total",res);
+		speed = m.group(1)
+		speed = int(float(speed))
+		print "myspeed",speed
+		return speed
 def get_cid():
 	return random.getrandbits(64)
 
 def do_ping(speed):
 	global url, cid
 
-	u = url + "client/" + str(cid) + "/ping?speed=" + str(speed)
+	u = url + "client/" + str(cid) + "/ping?speed=" + str(speed)+"&name="+socket.gethostname()
 	stuff = urlopen(u).read()
 	interval = int(stuff)
 
@@ -585,7 +600,7 @@ def try_ping(speed):
 			print("Conn refused (pinger)")
 			time.sleep(60)
 
-def get_work():
+def get_work(pyrit):
 	global url, cid, cracker,nets
 
 	u = url + "client/" + str(cid) + "/getwork"
@@ -612,39 +627,69 @@ def get_work():
 	
 	print("Cracking")
 
-	cmd = ["aircrack-ng", "-w", wl, "-b", crack['net'], "-q", cap]
+	if not pyrit:
+		cmd = ["aircrack-ng", "-w", wl, "-b", crack['net'], "-q", cap]
 
-	p = subprocess.Popen(cmd, stdout=subprocess.PIPE, \
-		stdin=subprocess.PIPE)
+		p = subprocess.Popen(cmd, stdout=subprocess.PIPE, \
+			stdin=subprocess.PIPE)
 
-	cracker = p
+		cracker = p
 
-	res = p.communicate()[0]
-	res = str(res)
+		res = p.communicate()[0]
+		res = str(res)
 
-	cracker = None
+		cracker = None
 	
-	if ("not in dictionary" in res):
-		print("No luck")
-		u = "%snet/%s/result?part=%s" % \
-		    	(url, crack['net'], crack['part'])
+		if ("not in dictionary" in res):
+			print("No luck")
+			u = "%snet/%s/result?part=%s" % \
+			    	(url, crack['net'], crack['part'])
 
-		stuff = urlopen(u).read()
-		print stuff
-	elif "KEY FOUND" in res:
-		pw = re.sub("^.*\[ ", "", res)
+			stuff = urlopen(u).read()
+			print stuff
+		elif "KEY FOUND" in res:
+			pw = re.sub("^.*\[ ", "", res)
 
-		i = pw.rfind(" ]")
-		if i == -1:
-			raise BaseException("Can't parse output")
+			i = pw.rfind(" ]")
+			if i == -1:
+				raise BaseException("Can't parse output")
 
-		pw = pw[:i]
+			pw = pw[:i]
 
-		print("Key for %s is %s" % (crack['net'], pw))
+			print("Key for %s is %s" % (crack['net'], pw))
 
-		u = "%snet/%s/result?pass=%s" % (url, crack['net'], pw)
-		stuff = urlopen(u).read()
-		print stuff
+			u = "%snet/%s/result?pass=%s" % (url, crack['net'], pw)
+			stuff = urlopen(u).read()
+			print stuff
+	else:
+		cmd = ["pyrit", "-r", cap, "-i", wl,"-b",crack['net'],"attack_passthrough"]
+		print "pyrit"
+		print cmd
+		p = subprocess.Popen(cmd, stdout=subprocess.PIPE, \
+			stdin=subprocess.PIPE)
+
+		cracker = p
+
+		res = p.communicate()[0]
+		res = str(res)
+		print res
+		cracker = None
+		if ("Password was not found" in res):
+			print("No luck")
+			u = "%snet/%s/result?part=%s" % \
+			    	(url, crack['net'], crack['part'])
+
+			stuff = urlopen(u).read()
+			print stuff
+		elif "The password is" in res:
+			m = re.search("The password is '(.*)'",res)
+			pw = m.group(1)
+
+			print("Key for %s is %s" % (crack['net'], pw))
+
+			u = "%snet/%s/result?pass=%s" % (url, crack['net'], pw)
+			stuff = urlopen(u).read()
+			print stuff			
 	return 0
 
 def decompress(fn,fn_decompressed):
@@ -758,9 +803,9 @@ def check_cap(fn, bssid):
 	if "No matching network found" not in res:
 		nets[bssid] = True
 
-def worker():
+def worker(pyrit):
 	while True:
-		interval = get_work()
+		interval = get_work(pyrit)
 		time.sleep(interval)
 
 def set_url():
@@ -777,13 +822,13 @@ def set_url():
 
 	url = "http://" + host + "/" + "dcrack/"
 
-def client():
+def client(pyrit):
 	global cid, cracker, url
 
 	set_url()
 	url += "worker/"
 
-	speed = get_speed()
+	speed = get_speed(pyrit)
 	print("Speed", speed)
 
 	cid = get_cid()
@@ -796,15 +841,15 @@ def client():
 
 	while True:
 		try:
-			do_client()
+			do_client(pyrit)
 			break
 		except URLError:
 			print("Conn refused")
 			time.sleep(60)
 
-def do_client():
+def do_client(pyrit):
 	try:
-		worker()
+		worker(pyrit)
 	except KeyboardInterrupt:
 		if cracker:
 			cracker.kill()
@@ -924,9 +969,12 @@ def cmd_status():
 	speed = 0
 	for c in stuff['clients']:
 		i += 1
-		speed += c
+		speed += c['speed']
 
-	print("Clients\t%d\nSpeed\t%d\n" % (i, speed))
+	print("Clients:%d\tSpeed:%d\n" % (i, speed))
+
+	for c in stuff['clients']:
+		print("%s:%d\n" % (c['name'], c['speed']))
 
 	need = 0
 
@@ -974,7 +1022,9 @@ def main():
 	if cmd == "server":
 		server()
 	elif cmd == "client":
-		client()
+		client(False)
+	elif cmd == "clientp":
+		client(True)
 	elif cmd == "cmd":
 		do_cmd()
 	else:
